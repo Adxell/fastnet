@@ -8,11 +8,13 @@
 #   fastnet ca                           show the CA certificate and its fingerprint (for phones)
 #   fastnet renew-cert                   re-issue the server certificate from your CA
 #   fastnet backup [dir]                 archive the database, config and CA
+#   fastnet 2fa <user>                   set up (or reset) a user's one-time code for the browser terminal
 set -euo pipefail
 SELF="$(readlink -f "$0")"
 ROOT="$(cd "$(dirname "$SELF")/.." && pwd)"
 source "$ROOT/lib/common.sh"
 source "$ROOT/lib/certs.sh"
+source "$ROOT/lib/webterm.sh"
 
 ETC=${FASTNET_ETC:-/etc/fastnet}
 read -r -a HS <<< "${FASTNET_HEADSCALE:-headscale}"  # overridable for tests
@@ -125,6 +127,11 @@ cmd_status() {
   echo "devices           : $(hs nodes list -o json-line | jq '(. // []) | length')"
   echo "listening         :"
   ss -lntup 2>/dev/null | awk -v p=":$PORT\$" '$5 ~ p || $5 ~ /:3478$/ || $5 ~ /:41641$/ {print "  " $1 " " $5}'
+  if [ -n "${WEB_DOMAIN:-}" ]; then
+    echo "browser terminal  : https://$WEB_DOMAIN:$WEB_PORT ($(systemctl is-active cockpit.socket 2>/dev/null || echo unknown))"
+    echo "  certificate     : expires $(openssl x509 -in /etc/cockpit/ws-certs.d/90-fastnet.cert -noout -enddate 2>/dev/null | cut -d= -f2 || echo '?')"
+    echo "  banned IPs      : $(fail2ban-client status fastnet-cockpit 2>/dev/null | sed -n 's/.*Currently banned:\s*//p' || echo '?')"
+  fi
   [ "$ok" = 1 ]
 }
 
@@ -176,7 +183,11 @@ case "$cmd" in
   ca) cmd_ca ;;
   renew-cert) cmd_renew_cert ;;
   backup) cmd_backup "$@" ;;
+  2fa)
+    [ -n "${WEB_DOMAIN:-}" ] || die "the browser terminal is not set up (server/install.sh --web-terminal <domain>)"
+    webterm_enroll "${1:?usage: fastnet 2fa <user>}"
+    echo "Sign in at https://$WEB_DOMAIN:$WEB_PORT" ;;
   _key) new_key "${1:-10m}" ;;  # internal: used by install.sh to join the server itself
-  help | -h | --help) sed -n '2,11p' "$SELF" | sed 's/^# \{0,1\}//' ;;
+  help | -h | --help) sed -n '2,12p' "$SELF" | sed 's/^# \{0,1\}//' ;;
   *) die "unknown command $cmd (fastnet help)" ;;
 esac

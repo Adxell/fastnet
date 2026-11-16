@@ -14,15 +14,20 @@
 #   --name N          this server's device name on the network (default: hostname)
 #   --no-join         do not install the client on this server / do not join it
 #   --no-firewall     do not open ports in ufw
+#   --web-terminal D  also serve a browser terminal at https://D:9090 (D = DNS name of this
+#                     server); sign-in is Linux user + password + one-time code (2FA).
+#                     Uses Let's Encrypt for D, so port 80/tcp must reach this server.
+#   --web-port N      port for the browser terminal (default 9090)
 # Re-running is safe: it keeps the CA, the database and joined devices.
 set -euo pipefail
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 source "$REPO/lib/common.sh"
 source "$REPO/lib/certs.sh"
 source "$REPO/lib/config.sh"
+source "$REPO/lib/webterm.sh"
 
 HOST="" PORT=443 TLS_MODE=own-ca ACME_EMAIL="" PUBLIC_IP="" BASE_DOMAIN=fastnet.internal
-NAME="$(hostname -s | tr '[:upper:]_' '[:lower:]-')" JOIN=1 FIREWALL=1
+NAME="$(hostname -s | tr '[:upper:]_' '[:lower:]-')" JOIN=1 FIREWALL=1 WEB_DOMAIN="" WEB_PORT=9090
 while [ $# -gt 0 ]; do
   case "$1" in
     --host) HOST=$2; shift ;;
@@ -34,7 +39,9 @@ while [ $# -gt 0 ]; do
     --name) NAME=$2; shift ;;
     --no-join) JOIN=0 ;;
     --no-firewall) FIREWALL=0 ;;
-    -h | --help) sed -n '2,20p' "$0"; exit 0 ;;
+    --web-terminal) WEB_DOMAIN=$2; shift ;;
+    --web-port) WEB_PORT=$2; shift ;;
+    -h | --help) sed -n '2,24p' "$0"; exit 0 ;;
     *) die "unknown option $1 (see --help)" ;;
   esac
   shift
@@ -45,6 +52,17 @@ need_root
 [[ $PORT =~ ^[0-9]+$ ]] || die "--port must be a number"
 case "$TLS_MODE" in own-ca | letsencrypt) ;; *) die "--tls must be own-ca or letsencrypt" ;; esac
 [ "$TLS_MODE" = letsencrypt ] && is_ipv4 "$HOST" && die "letsencrypt needs a DNS name, not an IP; use --tls own-ca"
+# a re-run without --web-terminal keeps the browser terminal that is already set up
+if [ -z "$WEB_DOMAIN" ] && [ -f /etc/fastnet/fastnet.env ]; then
+  WEB_DOMAIN=$(sed -n 's/^WEB_DOMAIN=//p' /etc/fastnet/fastnet.env)
+  WEB_PORT=$(sed -n 's/^WEB_PORT=//p' /etc/fastnet/fastnet.env); WEB_PORT=${WEB_PORT:-9090}
+  KEEP_WEB=1
+fi
+if [ -n "$WEB_DOMAIN" ]; then
+  is_ipv4 "$WEB_DOMAIN" && die "--web-terminal needs a DNS name (browsers need a real certificate for it), not an IP"
+  [[ $WEB_PORT =~ ^[0-9]+$ ]] || die "--web-port must be a number"
+  [ "$WEB_PORT" != "$PORT" ] || die "--web-port must differ from --port"
+fi
 valid_name "$NAME" || die "--name must be lowercase letters, digits and dashes"
 has_systemd || die "systemd is required"
 command -v apt-get >/dev/null || die "this installer supports Debian/Ubuntu (headscale ships .deb packages)"
@@ -77,6 +95,8 @@ PORT=$PORT
 TLS_MODE=$TLS_MODE
 BASE_DOMAIN=$BASE_DOMAIN
 SERVER_NAME=$NAME
+WEB_DOMAIN=$WEB_DOMAIN
+WEB_PORT=$WEB_PORT
 EOF
 
 # ---- 3. TLS
@@ -114,6 +134,11 @@ if [ "$FIREWALL" = 1 ] && command -v ufw >/dev/null && ufw status | grep -q "Sta
   ufw allow 41641/udp comment "fastnet direct WireGuard" >/dev/null
   [ "$TLS_MODE" = letsencrypt ] && ufw allow 80/tcp comment "fastnet ACME" >/dev/null
   log "ufw: opened $PORT/tcp, 3478/udp, 41641/udp"
+  if [ -n "$WEB_DOMAIN" ]; then
+    ufw allow "$WEB_PORT/tcp" comment "fastnet browser terminal" >/dev/null
+    ufw allow 80/tcp comment "fastnet ACME" >/dev/null
+    log "ufw: opened $WEB_PORT/tcp and 80/tcp (browser terminal + its certificate)"
+  fi
 fi
 
 # ---- 7. join this server to its own network
@@ -132,6 +157,20 @@ if [ "$JOIN" = 1 ]; then
   SERVER_IP=$(tailscale ip -4)
 fi
 
+# ---- 8. browser terminal (optional)
+if [ -n "$WEB_DOMAIN" ] && [ -z "${KEEP_WEB:-}" ]; then
+  webterm_setup "$WEB_DOMAIN" "$WEB_PORT" "$ACME_EMAIL" "$TLS_MODE"
+  owner=${SUDO_USER:-}
+  if [ -n "$owner" ] && [ "$owner" != root ] && [ ! -f "$(getent passwd "$owner" | cut -d: -f6)/.google_authenticator" ]; then
+    if [ -t 0 ] && [ -t 1 ]; then
+      log "setting up the one-time code for $owner"
+      webterm_enroll "$owner"
+    else
+      log "run 'sudo fastnet 2fa $owner' to set up your one-time code before signing in"
+    fi
+  fi
+fi
+
 cat <<EOF
 
 fastnet is ready.
@@ -139,7 +178,8 @@ fastnet is ready.
   This server    : ${SERVER_IP:-not joined}  (${NAME}.${BASE_DOMAIN})
 
 Make sure these reach this machine (router port forwards / cloud firewall):
-  $PORT/tcp, 3478/udp, 41641/udp$([ "$TLS_MODE" = letsencrypt ] && echo ", 80/tcp")
+  $PORT/tcp, 3478/udp, 41641/udp$([ "$TLS_MODE" = letsencrypt ] || [ -n "$WEB_DOMAIN" ] && echo ", 80/tcp")$([ -n "$WEB_DOMAIN" ] && echo ", $WEB_PORT/tcp")
+$([ -n "$WEB_DOMAIN" ] && printf '\nBrowser terminal: https://%s:%s  (user + password + one-time code; add users with: sudo fastnet 2fa <user>)\n' "$WEB_DOMAIN" "$WEB_PORT")
 
 Next: add a device with   sudo fastnet add laptop
 EOF
