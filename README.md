@@ -2,6 +2,8 @@
 
 Your own private network between your server, your computers and your phone: self-hosted, open source, and with no outside company in the middle.
 
+**New here? Follow [docs/getting-started.md](docs/getting-started.md)**: from a bare server to a working network and a browser terminal in about 20 minutes. Something broken? See [docs/troubleshooting.md](docs/troubleshooting.md). Security model: [SECURITY.md](SECURITY.md).
+
 fastnet installs and configures [Headscale](https://github.com/juanfont/headscale), an open-source coordination server, on your server. Your devices join with the open-source [Tailscale client](https://github.com/tailscale/tailscale). Traffic is end-to-end encrypted with WireGuard and goes **directly** between your devices and the server.
 
 | Piece | Runs on | License |
@@ -37,7 +39,7 @@ The only outside downloads are the pinned Headscale and Tailscale packages durin
 ## Install on the server
 
 ```sh
-git clone <this repo> && cd fastnet
+git clone https://github.com/Adxell/fastnet.git && cd fastnet
 sudo ./server/install.sh --host 203.0.113.7          # your public IP or DNS name
 ```
 
