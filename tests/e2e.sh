@@ -38,7 +38,7 @@ docker exec fastnet-e2e-hs bash -c '
   make_server_cert /etc/fastnet/ca /etc/headscale/tls fastnet-e2e-hs
   HOST=fastnet-e2e-hs PORT=8443 render_config > /etc/headscale/config.yaml
   headscale configtest >/dev/null 2>&1
-  ! grep -q ":9090" /etc/headscale/config.yaml  # 9090 belongs to the browser terminal
+  if grep -q ":9090" /etc/headscale/config.yaml; then echo "config uses 9090 (browser terminal port)"; exit 1; fi
   printf "HOST=fastnet-e2e-hs\nPORT=8443\nTLS_MODE=own-ca\nBASE_DOMAIN=fastnet.internal\nSERVER_NAME=srv\n" > /etc/fastnet/fastnet.env
   (headscale serve >/var/log/headscale.log 2>&1 &)
   for i in $(seq 30); do curl -fs --cacert /etc/fastnet/ca/ca.crt https://fastnet-e2e-hs:8443/health >/dev/null && break; sleep 1; done
