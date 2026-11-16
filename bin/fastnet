@@ -1,0 +1,182 @@
+#!/usr/bin/env bash
+# fastnet - manage the devices on your self-hosted network. Run on the server, as root.
+#
+#   fastnet add <device> [--expire 1h]   create a one-time invite for a laptop/PC/phone
+#   fastnet ls                           list devices (online, IPs, last seen)
+#   fastnet rm <device>                  remove a device from the network
+#   fastnet status                       health of the server, certificate, ports
+#   fastnet ca                           show the CA certificate and its fingerprint (for phones)
+#   fastnet renew-cert                   re-issue the server certificate from your CA
+#   fastnet backup [dir]                 archive the database, config and CA
+set -euo pipefail
+SELF="$(readlink -f "$0")"
+ROOT="$(cd "$(dirname "$SELF")/.." && pwd)"
+source "$ROOT/lib/common.sh"
+source "$ROOT/lib/certs.sh"
+
+ETC=${FASTNET_ETC:-/etc/fastnet}
+read -r -a HS <<< "${FASTNET_HEADSCALE:-headscale}"  # overridable for tests
+[ -f "$ETC/fastnet.env" ] || die "fastnet is not installed here ($ETC/fastnet.env missing). Run server/install.sh first."
+# shellcheck source=/dev/null
+source "$ETC/fastnet.env"
+URL="https://$HOST$([ "$PORT" = 443 ] || echo ":$PORT")"
+command -v jq >/dev/null || die "jq is required (apt-get install jq)"
+
+hs() { "${HS[@]}" "$@"; }
+
+user_id() {
+  hs users list -o json-line | jq -r '.[] | select(.name == "me") | .id' | head -n1 | grep . ||
+    die "owner account 'me' not found (re-run server/install.sh)"
+}
+
+new_key() {  # new_key EXPIRY -> single-use pre-auth key
+  hs preauthkeys create -u "$(user_id)" -e "$1" | tail -n1
+}
+
+node_id() {
+  hs nodes list -o json-line | jq -r --arg n "$1" '(. // [])[] | select(.given_name == $n or .name == $n) | .id' | head -n1
+}
+
+invite_dir() {
+  local owner=${SUDO_USER:-root} home
+  home=$(getent passwd "$owner" | cut -d: -f6)
+  echo "${FASTNET_INVITES:-$home/fastnet-invites}"
+}
+
+cmd_add() {
+  local name=${1:-} expire=1h
+  shift || true
+  while [ $# -gt 0 ]; do
+    case "$1" in --expire) expire=$2; shift ;; *) die "unknown option $1" ;; esac
+    shift
+  done
+  valid_name "$name" || die "usage: fastnet add <device-name>  (lowercase letters, digits, dashes)"
+  [ -z "$(node_id "$name")" ] || die "a device named $name already exists (fastnet rm $name first)"
+  local key dir file ca=""
+  key=$(new_key "$expire")
+  dir=$(invite_dir)
+  file="$dir/$name.sh"
+  mkdir -p "$dir" && chmod 700 "$dir"
+  [ "$TLS_MODE" = own-ca ] && ca=$(cat "$ETC/ca/ca.crt")
+  {
+    echo '#!/usr/bin/env bash'
+    echo "# fastnet invite for device '$name'. Single use, expires $expire after $(date '+%F %R')."
+    echo '# Run on the device:  sudo bash '"$name"'.sh'
+    echo 'set -euo pipefail'
+    printf 'SERVER_URL=%q\nAUTH_KEY=%q\nDEVICE_NAME=%q\n' "$URL" "$key" "$name"
+    printf 'CA_PEM=%q\n' "$ca"
+    sed -n '/^# ---- pinned versions/,$p' "$ROOT/lib/common.sh"
+    sed '1,/^# ---- invite body/d' "$ROOT/client/join.sh"
+  } > "$file"
+  chmod 600 "$file"
+  [ -n "${SUDO_USER:-}" ] && chown -R "$SUDO_USER" "$dir"
+
+  cat <<EOF
+Invite for "$name" (single use, expires in $expire)
+
+Linux (or macOS with the open-source tailscale CLI installed):
+  scp $(whoami_remote):$file .
+  sudo bash $name.sh
+
+Phone / Windows / macOS app:
+  1. Install the Tailscale app.$([ "$TLS_MODE" = own-ca ] && printf '\n  2. Install and trust the fastnet CA (see: fastnet ca).')
+  3. In the app choose "use a custom / alternate server": $URL
+  4. Sign in with this auth key:
+       $key
+EOF
+  if command -v qrencode >/dev/null; then
+    echo "  Auth key as QR code:"
+    qrencode -t ansiutf8 "$key"
+  fi
+}
+
+whoami_remote() { echo "${SUDO_USER:-root}@$HOST"; }
+
+cmd_ls() {
+  hs nodes list -o json-line | jq -r '
+    ["NAME", "IP", "ONLINE", "LAST SEEN"],
+    ((. // [])[] | [.given_name, (.ip_addresses[0] // "-"), (if .online then "yes" else "no" end),
+       ((.last_seen.seconds // 0) | if . == 0 then "-" else todate end)])
+    | @tsv' | column -t -s $'\t'
+}
+
+cmd_rm() {
+  local name=${1:-} id
+  [ -n "$name" ] || die "usage: fastnet rm <device>"
+  id=$(node_id "$name")
+  [ -n "$id" ] || die "no device named $name (see fastnet ls)"
+  hs nodes delete -i "$id" --force >/dev/null
+  log "removed $name"
+}
+
+cmd_status() {
+  local ok=1
+  printf 'headscale service : %s\n' "$(systemctl is-active headscale 2>/dev/null || echo unknown)"
+  if curl -fsk --max-time 5 "https://127.0.0.1:$PORT/health" >/dev/null; then
+    echo "health endpoint   : ok"
+  else
+    echo "health endpoint   : NOT RESPONDING"; ok=0
+  fi
+  echo "control URL       : $URL ($TLS_MODE)"
+  if [ "$TLS_MODE" = own-ca ]; then
+    echo "certificate       : expires $(openssl x509 -in /etc/headscale/tls/server.crt -noout -enddate | cut -d= -f2)"
+  fi
+  echo "this server       : $(tailscale ip -4 2>/dev/null || echo 'not joined') (${SERVER_NAME}.${BASE_DOMAIN})"
+  echo "devices           : $(hs nodes list -o json-line | jq '(. // []) | length')"
+  echo "listening         :"
+  ss -lntup 2>/dev/null | awk -v p=":$PORT\$" '$5 ~ p || $5 ~ /:3478$/ || $5 ~ /:41641$/ {print "  " $1 " " $5}'
+  [ "$ok" = 1 ]
+}
+
+cmd_ca() {
+  [ "$TLS_MODE" = own-ca ] || { echo "Using Let's Encrypt; devices need no extra CA."; return; }
+  echo "File       : $ETC/ca/ca.crt"
+  echo "SHA-256    : $(ca_fingerprint "$ETC/ca/ca.crt")"
+  echo
+  cat "$ETC/ca/ca.crt"
+  cat <<'EOF'
+
+Install it on a device before signing in:
+  iPhone/iPad : send the .crt to the device, install the profile (Settings > Profile Downloaded),
+                then enable it in Settings > General > About > Certificate Trust Settings.
+  Android     : Settings > Security > Encryption & credentials > Install a certificate > CA certificate.
+                Note: apps may ignore user-installed CAs; if the app cannot connect, use --tls letsencrypt.
+  Windows     : double-click the .crt > Install Certificate > Local Machine > Trusted Root Certification Authorities.
+  macOS       : sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain ca.crt
+Compare the SHA-256 fingerprint shown on the device with the one above.
+EOF
+}
+
+cmd_renew_cert() {
+  [ "$TLS_MODE" = own-ca ] || die "Let's Encrypt certificates renew automatically"
+  make_server_cert "$ETC/ca" /etc/headscale/tls "$HOST"
+  chown -R root:headscale /etc/headscale/tls
+  systemctl restart headscale
+  log "certificate renewed; expires $(openssl x509 -in /etc/headscale/tls/server.crt -noout -enddate | cut -d= -f2)"
+}
+
+cmd_backup() {
+  local dir=${1:-.} out
+  out="$dir/fastnet-backup-$(date +%Y%m%d-%H%M%S).tar.gz"
+  systemctl stop headscale
+  tar -czf "$out" /var/lib/headscale /etc/headscale "$ETC" 2>/dev/null || { systemctl start headscale; die "backup failed"; }
+  systemctl start headscale
+  chmod 600 "$out"
+  log "wrote $out — it contains your CA private key and network keys: keep it offline and private"
+}
+
+[ "$(id -u)" = 0 ] || [ -n "${FASTNET_HEADSCALE:-}" ] || die "run as root: sudo fastnet $*"
+cmd=${1:-help}
+shift || true
+case "$cmd" in
+  add) cmd_add "$@" ;;
+  ls | list) cmd_ls ;;
+  rm | remove) cmd_rm "$@" ;;
+  status) cmd_status ;;
+  ca) cmd_ca ;;
+  renew-cert) cmd_renew_cert ;;
+  backup) cmd_backup "$@" ;;
+  _key) new_key "${1:-10m}" ;;  # internal: used by install.sh to join the server itself
+  help | -h | --help) sed -n '2,11p' "$SELF" | sed 's/^# \{0,1\}//' ;;
+  *) die "unknown command $cmd (fastnet help)" ;;
+esac
