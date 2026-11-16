@@ -62,7 +62,7 @@ fi
 if [ -n "$WEB_DOMAIN" ]; then
   is_ipv4 "$WEB_DOMAIN" && die "--web-terminal needs a DNS name (browsers need a real certificate for it), not an IP"
   [[ $WEB_PORT =~ ^[0-9]+$ ]] || die "--web-port must be a number"
-  [ "$WEB_PORT" != "$PORT" ] || die "--web-port must differ from --port"
+  case "$WEB_PORT" in "$PORT" | 9098 | 50443) die "--web-port $WEB_PORT is used by headscale; pick another (e.g. 9443)" ;; esac
 fi
 valid_name "$NAME" || die "--name must be lowercase letters, digits and dashes"
 has_systemd || die "systemd is required"

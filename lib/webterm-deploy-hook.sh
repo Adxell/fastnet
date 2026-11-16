@@ -8,4 +8,4 @@ mkdir -p "$dir"
 # Cockpit uses the alphabetically last .cert file, so 90-* wins over its self-signed 0-*
 install -m 644 -o root -g root "$RENEWED_LINEAGE/fullchain.pem" "$dir/90-fastnet.cert"
 install -m 600 -o root -g root "$RENEWED_LINEAGE/privkey.pem" "$dir/90-fastnet.key"
-if [ -d /run/systemd/system ]; then systemctl try-restart cockpit.service || true; fi
+if [ -d /run/systemd/system ]; then systemctl try-restart cockpit.service 2>/dev/null || true; fi
