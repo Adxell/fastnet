@@ -25,6 +25,7 @@ source "$REPO/lib/common.sh"
 source "$REPO/lib/certs.sh"
 source "$REPO/lib/config.sh"
 source "$REPO/lib/webterm.sh"
+trap 'echo "[fastnet] ERROR: step failed at server/install.sh line $LINENO: $BASH_COMMAND" >&2' ERR
 
 HOST="" PORT=443 TLS_MODE=own-ca ACME_EMAIL="" PUBLIC_IP="" BASE_DOMAIN=fastnet.internal
 NAME="$(hostname -s | tr '[:upper:]_' '[:lower:]-')" JOIN=1 FIREWALL=1 WEB_DOMAIN="" WEB_PORT=9090

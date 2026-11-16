@@ -94,11 +94,19 @@ webterm_setup() {  # webterm_setup DOMAIN PORT EMAIL TLS_MODE
   webterm_fail2ban "$port"
   webterm_cert "$domain" "$email" "$tls_mode"
   systemctl daemon-reload
-  systemctl enable fail2ban >/dev/null 2>&1
-  systemctl restart fail2ban
-  systemctl enable cockpit.socket >/dev/null 2>&1
-  systemctl restart cockpit.socket
-  systemctl try-restart cockpit.service
+  systemctl enable fail2ban >/dev/null 2>&1 || true
+  if ! systemctl restart fail2ban; then
+    journalctl -u fail2ban -n 15 --no-pager >&2 || true
+    die "fail2ban did not start (see above, or: journalctl -u fail2ban)"
+  fi
+  systemctl enable cockpit.socket >/dev/null 2>&1 || true
+  if ! systemctl restart cockpit.socket; then
+    journalctl -u cockpit.socket -n 15 --no-pager >&2 || true
+    ss -lntp 2>/dev/null | grep ":$port " >&2 || true
+    die "Cockpit could not listen on port $port (see above; another program may use it: try --web-port 9443)"
+  fi
+  systemctl try-restart cockpit.service || true
+  sleep 1
   fail2ban-client status fastnet-cockpit >/dev/null 2>&1 || die "fail2ban jail did not start (journalctl -u fail2ban)"
   curl -fs --max-time 10 -o /dev/null --resolve "$domain:$port:127.0.0.1" "https://$domain:$port/" ||
     die "Cockpit is not answering on https://$domain:$port (journalctl -u cockpit)"
