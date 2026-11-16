@@ -19,7 +19,7 @@
 #                     Uses Let's Encrypt for D, so port 80/tcp must reach this server.
 #   --web-port N      port for the browser terminal (default 9090)
 # Re-running is safe: it keeps the CA, the database and joined devices.
-set -euo pipefail
+set -Eeuo pipefail
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 source "$REPO/lib/common.sh"
 source "$REPO/lib/certs.sh"
